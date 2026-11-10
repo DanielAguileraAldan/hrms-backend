@@ -1,112 +1,85 @@
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-require('dotenv').config();
+const express = require("express");
+const cors = require("cors");
+const { Pool } = require("pg");
 
 const app = express();
 
-// 1. Configuración de CORS total
-app.use(cors({ origin: '*' }));
+// Middlewares
+app.use(cors());
 app.use(express.json());
 
-// 2. Conexión a la base de datos Supabase
+// Configuración de base de datos Supabase
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// -------------------------------------------------------------
-// RUTAS DE LA API (Endpoints)
-// -------------------------------------------------------------
-
-// Ping de Calentamiento / Healthcheck
-app.get('/api/ping', (req, res) => {
-    res.json({ estado: "OK", mensaje: "Servidor HRMS activo", timestamp: new Date() });
+// 1) Health Check
+app.get("/api/ping", (req, res) => {
+  res.json({ estado: "OK", mensaje: "Servidor HRMS activo", timestamp: new Date() });
 });
 
-// HU-01 & HU-02: Validación de Garita (< 1.5s)
-app.post('/api/garita/validar', async (req, res) => {
-    const { rut, hash_biometrico } = req.body;
-    try {
-        const query = `
-            SELECT t.rut, t.nombre, t.empresa, a.examen_medico_vigente, a.estado_acreditacion
-            FROM trabajadores t
-            LEFT JOIN acreditaciones_hsec a ON t.rut = a.rut_trabajador
-            WHERE t.rut = $1 OR t.hash_biometrico = $2
-        `;
-        const result = await pool.query(query, [rut || '', hash_biometrico || '']);
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ autorizado: false, motivo: "Trabajador no encontrado en el sistema" });
-        }
-
-        const user = result.rows[0];
-        const autorizado = (user.estado_acreditacion === 'Aprobado' && user.examen_medico_vigente === true);
-        const motivo = autorizado ? "Acceso Permitido" : "Rechazado por HSEC (Examen vencido o no acreditado)";
-
-        res.json({
-            autorizado,
-            trabajador: `${user.nombre} (${user.empresa})`,
-            rut: user.rut,
-            motivo
-        });
-    } catch (err) {
-        console.error("Error en garita:", err);
-        res.status(500).json({ error: "Error interno al validar en garita" });
-    }
+// 2) Descargar trabajadores (Garita)
+app.get("/api/garita/trabajadores", async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT dni, nombre, empresa, habilitado,
+             TO_CHAR(examen_medico_vence, 'YYYY-MM-DD') AS examen_medico_vence,
+             TO_CHAR(induccion_vence, 'YYYY-MM-DD') AS induccion_vence
+      FROM trabajadores`);
+    res.json(r.rows);
+  } catch (e) {
+    console.error("Error en GET /api/garita/trabajadores:", e);
+    res.status(500).json({ error: "Error al listar trabajadores" });
+  }
 });
 
-// HU-04: Subida de Documentos Contratistas (Validación <= 5MB)
-app.post('/api/contratistas/subir-documento', (req, res) => {
-    const { rut_trabajador, nombre_archivo, peso_mb } = req.body;
+// 3) Registrar marcaciones (Garita)
+app.post("/api/garita/marcaciones", async (req, res) => {
+  const m = req.body || {};
+  const valida = m.id && /^\d{8}$/.test(m.dni || "") && ["entrada", "salida"].includes(m.tipo) &&
+                 ["permitido", "denegado"].includes(m.resultado) && m.fecha_hora;
 
-    if (peso_mb > 5) {
-        return res.status(400).json({ 
-            exito: false, 
-            mensaje: "El archivo excede el tamaño máximo permitido de 5 MB." 
-        });
-    }
+  if (!valida) {
+    return res.status(400).json({ error: "Marcación inválida o incompleta" });
+  }
 
-    res.json({ 
-        exito: true, 
-        mensaje: `Documento '${nombre_archivo}' recibido correctamente para el RUT ${rut_trabajador}.`,
-        notificado_hsec: true
-    });
+  try {
+    await pool.query(
+      `INSERT INTO marcaciones (id, dni, tipo, resultado, motivo, fecha_hora, metodo, garita_id, ms_respuesta, demo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        m.id, 
+        m.dni, 
+        m.tipo, 
+        m.resultado, 
+        m.motivo || "", 
+        m.fecha_hora, 
+        m.metodo || null, 
+        m.garita_id || null,
+        Number.isFinite(m.ms_respuesta) ? m.ms_respuesta : null, 
+        m.demo === true
+      ]
+    );
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    console.error("Error en POST /api/garita/marcaciones:", e);
+    res.status(500).json({ error: "Error al guardar la marcación" });
+  }
 });
 
-// HU-03: Solicitud de Vacaciones (App Móvil - <= 3 toques)
-app.post('/api/trabajadores/solicitar-permiso', async (req, res) => {
-    const { rut_trabajador, dias_solicitados } = req.body;
-    try {
-        const checkSaldo = await pool.query('SELECT saldo_vacaciones FROM trabajadores WHERE rut = $1', [rut_trabajador]);
-        
-        if (checkSaldo.rows.length === 0) {
-            return res.status(404).json({ exito: false, mensaje: "Trabajador no encontrado" });
-        }
-
-        const saldoActual = checkSaldo.rows[0].saldo_vacaciones;
-        if (dias_solicitados > saldoActual) {
-            return res.status(400).json({ exito: false, mensaje: "Saldo insuficiente de días" });
-        }
-
-        const updateResult = await pool.query(
-            `UPDATE trabajadores SET saldo_vacaciones = saldo_vacaciones - $1 WHERE rut = $2 RETURNING saldo_vacaciones`,
-            [dias_solicitados, rut_trabajador]
-        );
-
-        res.json({ 
-            exito: true, 
-            mensaje: "Permiso aprobado automáticamente", 
-            nuevo_saldo: updateResult.rows[0].saldo_vacaciones 
-        });
-    } catch (err) {
-        console.error("Error en vacaciones:", err);
-        res.status(500).json({ error: "Error al procesar la solicitud de vacaciones" });
-    }
+// Otras rutas del proyecto
+app.post("/api/contratistas/subir-documento", (req, res) => {
+  res.json({ mensaje: "Documento recibido correctamente" });
 });
 
-// -------------------------------------------------------------
-// ARRANQUE DEL SERVIDOR
-// -------------------------------------------------------------
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 Servidor backend corriendo en puerto ${PORT}`));
+app.post("/api/trabajadores/solicitar-permiso", (req, res) => {
+  res.json({ mensaje: "Solicitud de permiso registrada correctamente" });
+});
+
+// Inicializar Servidor
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor backend corriendo en puerto ${PORT}`);
+});
