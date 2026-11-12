@@ -1,121 +1,174 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 
 const app = express();
-
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Configuración de base de datos Supabase
+// Conexión a PostgreSQL (Supabase)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  ssl: { rejectUnauthorized: false },
 });
 
-// 1) Health Check
-app.get("/api/ping", (req, res) => {
-  res.json({ estado: "OK", mensaje: "Servidor HRMS activo", timestamp: new Date() });
+// Ruta base de verificación
+app.get("/", (req, res) => {
+  res.json({
+    sistema: "HRMS Minera Cordillera API",
+    estado: "Operativo en la nube",
+  });
 });
 
-// 2) Descargar trabajadores (Garita)
-app.get("/api/garita/trabajadores", async (req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT dni, nombre, empresa, habilitado,
-             TO_CHAR(examen_medico_vence, 'YYYY-MM-DD') AS examen_medico_vence,
-             TO_CHAR(induccion_vence, 'YYYY-MM-DD') AS induccion_vence
-      FROM trabajadores`);
-    res.json(r.rows);
-  } catch (e) {
-    console.error("Error en GET /api/garita/trabajadores:", e);
-    res.status(500).json({ error: "Error al listar trabajadores" });
-  }
-});
-
-// 3) Registrar marcaciones (Garita)
-app.post("/api/garita/marcaciones", async (req, res) => {
-  const m = req.body || {};
-  const valida = m.id && /^\d{8}$/.test(m.dni || "") && ["entrada", "salida"].includes(m.tipo) &&
-                 ["permitido", "denegado"].includes(m.resultado) && m.fecha_hora;
-
-  if (!valida) {
-    return res.status(400).json({ error: "Marcación inválida o incompleta" });
-  }
-
-  try {
-    await pool.query(
-      `INSERT INTO marcaciones (id, dni, tipo, resultado, motivo, fecha_hora, metodo, garita_id, ms_respuesta, demo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        m.id,
-        m.dni,
-        m.tipo,
-        m.resultado,
-        m.motivo || "",
-        m.fecha_hora,
-        m.metodo || null,
-        m.garita_id || null,
-        Number.isFinite(m.ms_respuesta) ? m.ms_respuesta : null,
-        m.demo === true
-      ]
-    );
-    res.status(201).json({ ok: true });
-  } catch (e) {
-    console.error("Error en POST /api/garita/marcaciones:", e);
-    res.status(500).json({ error: "Error al guardar la marcación" });
-  }
-});
-
-// 4) Login de Trabajadores (App Móvil)
+// 1. LOGIN APP MÓVIL Y PORTALES
 app.post("/api/trabajadores/login", async (req, res) => {
-  const { password } = req.body || {};
-  const dni = String(req.body?.dni || "").replace(/\./g, "").replace(/-/g, "").trim();
-
-  if (!dni || !password) {
-    return res.status(400).json({ success: false, error: "DNI y contraseña requeridos" });
-  }
-
   try {
-    const r = await pool.query("SELECT * FROM trabajadores WHERE dni = $1", [dni]);
-    if (r.rows.length === 0) {
-      return res.status(404).json({ success: false, error: "RUT o contraseña incorrectos" });
+    const { dni, password } = req.body;
+    if (!dni || !password) {
+      return res.status(400).json({ error: "Debe ingresar DNI y contraseña" });
     }
 
-    const trabajador = r.rows[0];
+    const dniLimpio = String(dni).replace(/[^0-9kK]/g, "").trim();
+    const result = await pool.query(
+      "SELECT * FROM trabajadores WHERE dni = $1",
+      [dniLimpio]
+    );
 
-    if (trabajador.password !== password) {
-      return res.status(401).json({ success: false, error: "RUT o contraseña incorrectos" });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Trabajador no encontrado" });
+    }
+
+    const trabajador = result.rows[0];
+    const passValida = trabajador.password || trabajador.dni;
+
+    if (String(password).trim() !== String(passValida).trim()) {
+      return res.status(401).json({ error: "Contraseña incorrecta" });
     }
 
     delete trabajador.password;
 
-    res.status(200).json({
+    res.json({
       success: true,
       token: `hrms-token-${trabajador.dni}-${Date.now()}`,
       mensaje: "Login exitoso",
-      trabajador
+      trabajador,
     });
-  } catch (e) {
-    console.error("Error en Login:", e);
-    res.status(500).json({ success: false, error: "Error en el servidor al autenticar" });
+  } catch (error) {
+    console.error("Error en login:", error);
+    res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 
-// 5) Subir Documento (Portal Contratistas HSEC)
-app.post("/api/contratistas/subir-documento", (req, res) => {
-  res.json({ mensaje: "Documento recibido correctamente" });
+// 2. GARITA: OBTENER NÓMINA DE TRABAJADORES
+app.get("/api/garita/trabajadores", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT dni, nombre, empresa, habilitado, examen_medico_vence, induccion_vence FROM trabajadores ORDER BY nombre ASC"
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error al obtener trabajadores:", error);
+    res.status(500).json({ error: "Error al consultar nómina" });
+  }
 });
 
-// 6) Solicitar Permiso (App Móvil)
-app.post("/api/trabajadores/solicitar-permiso", (req, res) => {
-  res.json({ mensaje: "Solicitud de permiso registrada correctamente" });
+// 3. GARITA: REGISTRAR MARCACIÓN (ENTRADA / SALIDA / RECHAZO)
+app.post("/api/garita/marcaciones", async (req, res) => {
+  try {
+    const { dni, tipo, permitido, motivo } = req.body;
+    const result = await pool.query(
+      `INSERT INTO marcaciones (dni, tipo, permitido, motivo, fecha)
+       VALUES ($1, $2, $3, $4, NOW()) RETURNING *`,
+      [dni, tipo || "ENTRADA", permitido !== false, motivo || "Validado en garita"]
+    );
+    res.status(201).json({
+      success: true,
+      mensaje: "Marcación registrada correctamente",
+      marcacion: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Error al registrar marcación:", error);
+    res.status(500).json({ error: "No se pudo registrar la marcación" });
+  }
 });
 
-// Inicializar Servidor
-const PORT = process.env.PORT || 10000;
+// 4. WEB CONTRATISTAS: HABILITAR O ACTUALIZAR DOCUMENTACIÓN HSEC
+app.post("/api/contratistas/documentos", async (req, res) => {
+  try {
+    const { dni, habilitado, examen_medico_vence, induccion_vence } = req.body;
+    const result = await pool.query(
+      `UPDATE trabajadores
+       SET habilitado = COALESCE($1, habilitado),
+           examen_medico_vence = COALESCE($2, examen_medico_vence),
+           induccion_vence = COALESCE($3, induccion_vence)
+       WHERE dni = $4
+       RETURNING dni, nombre, empresa, habilitado, examen_medico_vence, induccion_vence`,
+      [habilitado, examen_medico_vence, induccion_vence, dni]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Trabajador no encontrado" });
+    }
+
+    res.json({
+      success: true,
+      mensaje: "Documentación HSEC actualizada",
+      trabajador: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Error actualizando documentos:", error);
+    res.status(500).json({ error: "Error al actualizar documentación" });
+  }
+});
+
+// 5. MÓDULO DE PERMISOS (APP MÓVIL SOLICITA Y SUPERVISIÓN APRUEBA/RECHAZA)
+let solicitudesPermisos = [
+  {
+    id: 1,
+    dni: "87654321",
+    nombre: "María Torres Huamán",
+    tipo: "Vacaciones",
+    fecha_inicio: "2026-11-20",
+    fecha_fin: "2026-11-25",
+    motivo: "Descanso anual programado",
+    estado: "PENDIENTE",
+  },
+];
+
+// Crear solicitud desde App Móvil
+app.post("/api/trabajadores/permisos", (req, res) => {
+  const { dni, nombre, tipo, fecha_inicio, fecha_fin, motivo } = req.body;
+  const nueva = {
+    id: Date.now(),
+    dni: dni || "87654321",
+    nombre: nombre || "Trabajador Faena",
+    tipo: tipo || "Permiso Administrativo",
+    fecha_inicio: fecha_inicio || "2026-11-15",
+    fecha_fin: fecha_fin || "2026-11-16",
+    motivo: motivo || "Solicitud desde App Móvil",
+    estado: "PENDIENTE",
+  };
+  solicitudesPermisos.unshift(nueva);
+  res.status(201).json({ success: true, permiso: nueva });
+});
+
+// Listar solicitudes (para App Móvil y Panel de Aprobación)
+app.get("/api/permisos", (req, res) => {
+  res.json(solicitudesPermisos);
+});
+
+// Aprobar o rechazar solicitud
+app.patch("/api/permisos/:id", (req, res) => {
+  const permiso = solicitudesPermisos.find((p) => p.id == req.params.id);
+  if (!permiso) {
+    return res.status(404).json({ error: "Solicitud no encontrada" });
+  }
+  permiso.estado = req.body.estado; // "APROBADO" o "RECHAZADO"
+  res.json({ success: true, permiso });
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend corriendo en puerto ${PORT}`);
+  console.log(`Servidor HRMS Minera Cordillera corriendo en puerto ${PORT}`);
 });
