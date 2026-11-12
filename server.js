@@ -5,15 +5,15 @@ const { Pool } = require("pg");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Aumentamos el límite a 10MB para soportar archivos PDF/JPG de hasta 5MB
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-// Conexión a PostgreSQL (Supabase)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// Ruta base de verificación
 app.get("/", (req, res) => {
   res.json({
     sistema: "HRMS Minera Cordillera API",
@@ -73,7 +73,7 @@ app.get("/api/garita/trabajadores", async (req, res) => {
   }
 });
 
-// 3. GARITA: REGISTRAR MARCACIÓN (ENTRADA / SALIDA / RECHAZO)
+// 3. GARITA: REGISTRAR MARCACIÓN
 app.post("/api/garita/marcaciones", async (req, res) => {
   try {
     const { dni, tipo, permitido, motivo } = req.body;
@@ -93,10 +93,22 @@ app.post("/api/garita/marcaciones", async (req, res) => {
   }
 });
 
-// 4. WEB CONTRATISTAS: HABILITAR O ACTUALIZAR DOCUMENTACIÓN HSEC
+// Registro en memoria de documentos cargados para el MVP
+let documentosCargados = [];
+
+// 4. WEB CONTRATISTAS: HABILITAR + CARGA DE DOCUMENTO (HASTA 5MB)
 app.post("/api/contratistas/documentos", async (req, res) => {
   try {
-    const { dni, habilitado, examen_medico_vence, induccion_vence } = req.body;
+    const {
+      dni,
+      habilitado,
+      examen_medico_vence,
+      induccion_vence,
+      archivo_nombre,
+      archivo_tamano_mb,
+      archivo_base64,
+    } = req.body;
+
     const result = await pool.query(
       `UPDATE trabajadores
        SET habilitado = COALESCE($1, habilitado),
@@ -111,9 +123,21 @@ app.post("/api/contratistas/documentos", async (req, res) => {
       return res.status(404).json({ error: "Trabajador no encontrado" });
     }
 
+    if (archivo_nombre) {
+      documentosCargados.unshift({
+        id: Date.now(),
+        dni,
+        nombre_trabajador: result.rows[0].nombre,
+        archivo_nombre,
+        archivo_tamano_mb,
+        archivo_base64,
+        fecha: new Date().toLocaleString(),
+      });
+    }
+
     res.json({
       success: true,
-      mensaje: "Documentación HSEC actualizada",
+      mensaje: "Documentación HSEC y archivo respaldados correctamente",
       trabajador: result.rows[0],
     });
   } catch (error) {
@@ -122,7 +146,12 @@ app.post("/api/contratistas/documentos", async (req, res) => {
   }
 });
 
-// 5. MÓDULO DE PERMISOS (APP MÓVIL SOLICITA Y SUPERVISIÓN APRUEBA/RECHAZA)
+// Listar documentos HSEC subidos
+app.get("/api/contratistas/archivos", (req, res) => {
+  res.json(documentosCargados);
+});
+
+// 5. MÓDULO DE PERMISOS (SOLICITUD Y APROBACIÓN)
 let solicitudesPermisos = [
   {
     id: 1,
@@ -136,7 +165,6 @@ let solicitudesPermisos = [
   },
 ];
 
-// Crear solicitud desde App Móvil
 app.post("/api/trabajadores/permisos", (req, res) => {
   const { dni, nombre, tipo, fecha_inicio, fecha_fin, motivo } = req.body;
   const nueva = {
@@ -153,18 +181,16 @@ app.post("/api/trabajadores/permisos", (req, res) => {
   res.status(201).json({ success: true, permiso: nueva });
 });
 
-// Listar solicitudes (para App Móvil y Panel de Aprobación)
 app.get("/api/permisos", (req, res) => {
   res.json(solicitudesPermisos);
 });
 
-// Aprobar o rechazar solicitud
 app.patch("/api/permisos/:id", (req, res) => {
   const permiso = solicitudesPermisos.find((p) => p.id == req.params.id);
   if (!permiso) {
     return res.status(404).json({ error: "Solicitud no encontrada" });
   }
-  permiso.estado = req.body.estado; // "APROBADO" o "RECHAZADO"
+  permiso.estado = req.body.estado;
   res.json({ success: true, permiso });
 });
 
