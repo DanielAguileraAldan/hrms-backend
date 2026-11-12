@@ -50,15 +50,15 @@ app.post("/api/garita/marcaciones", async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (id) DO NOTHING`,
       [
-        m.id, 
-        m.dni, 
-        m.tipo, 
-        m.resultado, 
-        m.motivo || "", 
-        m.fecha_hora, 
-        m.metodo || null, 
+        m.id,
+        m.dni,
+        m.tipo,
+        m.resultado,
+        m.motivo || "",
+        m.fecha_hora,
+        m.metodo || null,
         m.garita_id || null,
-        Number.isFinite(m.ms_respuesta) ? m.ms_respuesta : null, 
+        Number.isFinite(m.ms_respuesta) ? m.ms_respuesta : null,
         m.demo === true
       ]
     );
@@ -71,18 +71,36 @@ app.post("/api/garita/marcaciones", async (req, res) => {
 
 // 4) Login de Trabajadores (App Móvil)
 app.post("/api/trabajadores/login", async (req, res) => {
-  const { dni, password } = req.body || {};
-  if (!dni) return res.status(400).json({ error: "DNI requerido" });
+  const { password } = req.body || {};
+  const dni = String(req.body?.dni || "").replace(/\./g, "").replace(/-/g, "").trim();
+
+  if (!dni || !password) {
+    return res.status(400).json({ success: false, error: "DNI y contraseña requeridos" });
+  }
 
   try {
     const r = await pool.query("SELECT * FROM trabajadores WHERE dni = $1", [dni]);
     if (r.rows.length === 0) {
-      return res.status(404).json({ error: "Trabajador no encontrado" });
+      return res.status(404).json({ success: false, error: "RUT o contraseña incorrectos" });
     }
-    res.json({ mensaje: "Login exitoso", trabajador: r.rows[0] });
+
+    const trabajador = r.rows[0];
+
+    if (trabajador.password !== password) {
+      return res.status(401).json({ success: false, error: "RUT o contraseña incorrectos" });
+    }
+
+    delete trabajador.password;
+
+    res.status(200).json({
+      success: true,
+      token: `hrms-token-${trabajador.dni}-${Date.now()}`,
+      mensaje: "Login exitoso",
+      trabajador
+    });
   } catch (e) {
     console.error("Error en Login:", e);
-    res.status(500).json({ error: "Error en el servidor al autenticar" });
+    res.status(500).json({ success: false, error: "Error en el servidor al autenticar" });
   }
 });
 
