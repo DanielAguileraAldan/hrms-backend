@@ -69,11 +69,29 @@ app.post("/api/garita/marcaciones", async (req, res) => {
   }
 });
 
-// Otras rutas del proyecto
+// 4) Login de Trabajadores (App Móvil)
+app.post("/api/trabajadores/login", async (req, res) => {
+  const { dni, password } = req.body || {};
+  if (!dni) return res.status(400).json({ error: "DNI requerido" });
+
+  try {
+    const r = await pool.query("SELECT * FROM trabajadores WHERE dni = $1", [dni]);
+    if (r.rows.length === 0) {
+      return res.status(404).json({ error: "Trabajador no encontrado" });
+    }
+    res.json({ mensaje: "Login exitoso", trabajador: r.rows[0] });
+  } catch (e) {
+    console.error("Error en Login:", e);
+    res.status(500).json({ error: "Error en el servidor al autenticar" });
+  }
+});
+
+// 5) Subir Documento (Portal Contratistas HSEC)
 app.post("/api/contratistas/subir-documento", (req, res) => {
   res.json({ mensaje: "Documento recibido correctamente" });
 });
 
+// 6) Solicitar Permiso (App Móvil)
 app.post("/api/trabajadores/solicitar-permiso", (req, res) => {
   res.json({ mensaje: "Solicitud de permiso registrada correctamente" });
 });
