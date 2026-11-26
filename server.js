@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -724,6 +725,7 @@ app.get(
     }
   }
 );
+
 // ==========================================
 // 7. MÓDULO DE PERMISOS
 // ==========================================
@@ -764,6 +766,7 @@ app.get(
     }
   }
 );
+
 app.post(
   "/api/trabajadores/permisos",
   autenticarToken,
@@ -1059,16 +1062,17 @@ app.post(
         });
       }
 
+      // dias_corridos es una columna generada por PostgreSQL.
+      // No debe enviarse en el INSERT: la base de datos calcula su valor.
       const result = await pool.query(
         `INSERT INTO vacaciones
-          (dni, fecha_inicio, fecha_fin, dias_corridos, observacion)
-         VALUES ($1, $2, $3, $4, $5)
+          (dni, fecha_inicio, fecha_fin, observacion)
+         VALUES ($1, $2, $3, $4)
          RETURNING *`,
         [
           trabajador.dni,
           fecha_inicio,
           fecha_fin,
-          diasCorridos,
           observacionLimpia,
         ]
       );
@@ -1145,6 +1149,7 @@ app.get(
     }
   }
 );
+
 // ------------------------------------------
 // 8.3 APROBAR O RECHAZAR SOLICITUDES
 // ------------------------------------------
